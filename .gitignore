@@ -1,5 +1,6 @@
-claude-safety
-claude-safety-*
+# Built binaries (root-level only, not the cmd/ source directory)
+/claude-safety
+/claude-safety-*
 
 .DS_Store
 
