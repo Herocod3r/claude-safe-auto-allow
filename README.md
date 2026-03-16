@@ -12,9 +12,11 @@ Command entered
     v
 PreToolUse (claude-safety guard)
     |
+    |-- AST parse the command
+    |
+    |-- Dangerous pattern?   --> Claude permission prompt (never auto-approved)
+    |-- Command substitution? -> Claude permission prompt (can't verify statically)
     |-- Matches allowlist?   --> AUTO-APPROVED
-    |-- Matches safe list?   --> AUTO-APPROVED
-    |-- Matches dangerous?   --> Claude permission prompt
     |
     '-- No match -----------> Claude permission prompt
                                   |
@@ -26,13 +28,15 @@ PreToolUse (claude-safety guard)
                           "Want to always allow this?"
 ```
 
+Commands are parsed using a real shell AST (not regex), so dangerous patterns inside pipelines, conditionals, and compound statements are caught correctly.
+
 ## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Herocod3r/claude-safe-auto-allow/main/install.sh | bash
 ```
 
-The installer downloads the latest release binary for your OS and architecture, writes it to `~/.claude-safe-auto-allow/claude-safety`, migrates any old allowlist, and patches `~/.claude/settings.json`.
+The installer downloads the latest release binary for your OS and architecture, writes it to `~/.claude-safe-auto-allow/claude-safety`, seeds the default allowlist, and patches `~/.claude/settings.json`.
 
 Restart Claude Code after installation.
 
@@ -46,19 +50,21 @@ The uninstaller removes the hook entries from `~/.claude/settings.json` and opti
 
 ## Safety model
 
-Dangerous commands are not auto-approved and are not auto-learned. They fall through to Claude's built-in permission prompt so the user still has final control.
+Dangerous commands are never auto-approved and never auto-learned. They fall through to Claude's built-in permission prompt so the user retains final control.
+
+Commands containing `$()` or backtick substitutions always fall through — their arguments can't be verified statically.
 
 Examples of dangerous commands:
 
 | Category | Examples |
 |----------|----------|
-| Destructive filesystem | `rm -rf /`, `rm -rf ~`, `rm -rf .`, `rm -rf ..`, `rm -rf /*` |
+| Destructive filesystem | `rm -rf /`, `rm -rf ~`, `rm -rf .`, `rm -rf /*` |
 | Critical system dirs | `rm -rf /etc`, `/usr`, `/bin`, `/System`, `/Library` |
 | Database destruction | `DROP DATABASE`, `DROP TABLE`, `TRUNCATE`, `DELETE FROM` without `WHERE` |
-| Disk operations | `mkfs`, `dd of=/dev/...`, redirect to raw device |
+| Disk operations | `mkfs`, `dd of=/dev/...`, redirect to raw block device |
 | Fork bombs | `:(){ :\|:& };:` |
 | Permission nuking | `chmod -R 777 /`, `chown -R ... /` |
-| Force push protected | `git push --force origin main/master` |
+| Force push protected | `git push --force origin main/master`, `git push origin +main` |
 | Kubernetes destruction | `kubectl delete namespace`, `kubectl delete --all` |
 | System commands | `shutdown`, `reboot`, `halt`, `poweroff` |
 | Critical services | `systemctl stop docker/sshd/network` |
@@ -67,35 +73,44 @@ Examples of safe commands that are auto-approved:
 
 | Category | Examples |
 |----------|----------|
-| Read-only | `ls`, `cat`, `head`, `tail`, `find`, `stat`, `du`, `df` |
-| Inspection | `ps`, `top`, `lsof`, `netstat`, `whoami`, `uname` |
-| Network (read) | `curl` GETs, `wget` without output or POST flags, `dig`, `ping` |
-| Git (safe) | `status`, `log`, `diff`, `add`, `commit`, `push` without `--force`, `fetch`, `pull` |
-| Build/test | `npm test`, `go test`, `make`, `pytest`, `jest`, `cargo build` |
-| Interpreters | `node script.js`, `python3 script.py`, `ruby script.rb` |
-| K8s (read) | `kubectl get`, `describe`, `logs`, `explain` |
-| AWS (read) | `aws sts`, `aws s3 ls`, `aws ec2 describe` |
+| Read-only filesystem | `ls`, `cat`, `head`, `tail`, `find`, `stat`, `du`, `df` |
+| Inspection | `ps`, `lsof`, `netstat`, `whoami`, `uname` |
 | Search | `grep`, `rg`, `ag`, `sed -n` |
-| Terraform (read) | `plan`, `show`, `validate`, `fmt`, `init` |
-| Utilities | `mkdir`, `jq`, `yq`, `echo`, `date` |
+| Git (safe) | `status`, `log`, `diff`, `add`, `commit`, `push`, `fetch`, `pull` |
+| File mutation (git repos only) | `mv`, `cp`, `touch` — only inside a git-tracked directory |
+| Build / test | `npm test`, `go test`, `make`, `pytest`, `jest`, `cargo build` |
+| Runtimes | `node`, `python3`, `ruby`, `deno`, `bun`, `swift`, `dart` |
+| Package managers | `npm`, `yarn`, `pnpm`, `pip`, `gem`, `cargo`, `composer` |
+| K8s (read) | `kubectl get`, `describe`, `logs`, `explain`, `apply`, `port-forward` |
+| Cloud CLIs | `aws sts/s3/ec2`, `gcloud`, `az`, `helm`, `doctl` |
+| Terraform (safe) | `plan`, `show`, `validate`, `fmt`, `init` |
+| Utilities | `mkdir`, `jq`, `yq`, `echo`, `date`, `open` |
+
+### git-repo scoped entries
+
+`mv`, `cp`, and `touch` are auto-approved only when Claude is operating inside a git repository (checked by walking up the directory tree for a `.git` entry). Outside a repo they fall through to the normal prompt.
+
+## Default allowlist
+
+On first run, `claude-safety guard` seeds `~/.claude-safe-auto-allow/safety-allowlist.json` with 240+ safe command patterns embedded in the binary. You can edit this file to add, remove, or tighten entries — changes take effect immediately without restarting.
 
 ## Learning allowlist
 
 When a command falls through to the normal prompt and you approve it, Claude can offer to save it for next time as a prefix or exact match.
 
-The allowlist lives at `~/.claude-safe-auto-allow/safety-allowlist.json`:
+The allowlist at `~/.claude-safe-auto-allow/safety-allowlist.json` supports three pattern types:
 
 ```json
 {
   "patterns": [
     { "type": "prefix", "value": "docker build" },
-    { "type": "exact", "value": "terraform apply -auto-approve" },
-    { "type": "regex", "value": "^ansible-playbook\\s" }
+    { "type": "exact",  "value": "terraform apply -auto-approve" },
+    { "type": "regex",  "value": "^ansible-playbook\\s" }
   ]
 }
 ```
 
-Dangerous commands never bypass the dangerous check, even if the allowlist contains a matching entry.
+Dangerous commands never bypass the danger check, even if the allowlist contains a matching entry.
 
 ## Building from source
 
@@ -117,7 +132,7 @@ bash tests/test-install-e2e.sh
 
 - Claude Code
 - No runtime dependencies for end users
-- Go 1.21+ only if you are building from source
+- Go 1.21+ only if building from source
 
 ## License
 
