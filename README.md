@@ -1,8 +1,8 @@
 # claude-safe-auto-allow
 
-Smart safety hooks for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that **block dangerous commands**, **auto-approve safe ones**, and **learn from your approvals** over time.
+Smart safety hooks for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that auto-approve safe commands, let dangerous commands fall through to Claude's normal permission prompt, and learn from commands you choose to approve.
 
-Zero dependencies. Pure Node.js. Works on macOS and Linux.
+Zero runtime dependencies. Single binary. Works on macOS and Linux.
 
 ## How it works
 
@@ -10,64 +10,49 @@ Zero dependencies. Pure Node.js. Works on macOS and Linux.
 Command entered
     |
     v
-PreToolUse (safety-guard.js)
+PreToolUse (claude-safety guard)
     |
-    |-- Matches block list?  --> BLOCKED (never runs)
     |-- Matches allowlist?   --> AUTO-APPROVED
     |-- Matches safe list?   --> AUTO-APPROVED
+    |-- Matches dangerous?   --> Claude permission prompt
     |
-    '-- No match --> Normal permission prompt
-                         |
-                         v
-                     User approves
-                         |
-                         v
-                 PostToolUse (safety-learn.js)
-                     "Want to always allow this?"
-                         |
-                         |-- 1. Prefix match (e.g. "docker build")
-                         |-- 2. Exact match  (full command)
-                         '-- 3. No thanks
+    '-- No match -----------> Claude permission prompt
+                                  |
+                                  v
+                              User approves
+                                  |
+                                  v
+                      PostToolUse (claude-safety learn)
+                          "Want to always allow this?"
 ```
 
 ## Install
-
-### One-liner (recommended)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Herocod3r/claude-safe-auto-allow/main/install.sh | bash
 ```
 
-### Manual (from clone)
+The installer downloads the latest release binary for your OS and architecture, writes it to `~/.claude-safe-auto-allow/claude-safety`, migrates any old allowlist, and patches `~/.claude/settings.json`.
 
-```bash
-git clone https://github.com/Herocod3r/claude-safe-auto-allow.git ~/.claude-safe-auto-allow
-cd ~/.claude-safe-auto-allow
-node scripts/install.js
-```
-
-Then **restart Claude Code**.
+Restart Claude Code after installation.
 
 ## Uninstall
 
 ```bash
-node ~/.claude-safe-auto-allow/scripts/uninstall.js
-rm -rf ~/.claude-safe-auto-allow
+bash <(curl -fsSL https://raw.githubusercontent.com/Herocod3r/claude-safe-auto-allow/main/uninstall.sh)
 ```
 
-Or use the uninstall script:
+The uninstaller removes the hook entries from `~/.claude/settings.json` and optionally deletes `~/.claude-safe-auto-allow/`.
 
-```bash
-bash ~/.claude-safe-auto-allow/uninstall.sh
-```
+## Safety model
 
-## What gets blocked
+Dangerous commands are not auto-approved and are not auto-learned. They fall through to Claude's built-in permission prompt so the user still has final control.
 
-Commands that are **always blocked** regardless of allowlist:
+Examples of dangerous commands:
 
 | Category | Examples |
 |----------|----------|
-| Destructive filesystem | `rm -rf /`, `rm -rf ~`, `rm -rf $HOME`, `sudo rm -rf` |
+| Destructive filesystem | `rm -rf /`, `rm -rf ~`, `rm -rf .`, `rm -rf ..`, `rm -rf /*` |
 | Critical system dirs | `rm -rf /etc`, `/usr`, `/bin`, `/System`, `/Library` |
 | Database destruction | `DROP DATABASE`, `DROP TABLE`, `TRUNCATE`, `DELETE FROM` without `WHERE` |
 | Disk operations | `mkfs`, `dd of=/dev/...`, redirect to raw device |
@@ -78,34 +63,27 @@ Commands that are **always blocked** regardless of allowlist:
 | System commands | `shutdown`, `reboot`, `halt`, `poweroff` |
 | Critical services | `systemctl stop docker/sshd/network` |
 
-## What gets auto-approved
-
-Commands that are **always approved** (no prompt):
+Examples of safe commands that are auto-approved:
 
 | Category | Examples |
 |----------|----------|
 | Read-only | `ls`, `cat`, `head`, `tail`, `find`, `stat`, `du`, `df` |
 | Inspection | `ps`, `top`, `lsof`, `netstat`, `whoami`, `uname` |
-| Network (read) | `curl`, `wget`, `dig`, `ping` |
-| Git (safe) | `status`, `log`, `diff`, `add`, `commit`, `push` (non-force), `fetch`, `pull` |
+| Network (read) | `curl` GETs, `wget` without output or POST flags, `dig`, `ping` |
+| Git (safe) | `status`, `log`, `diff`, `add`, `commit`, `push` without `--force`, `fetch`, `pull` |
 | Build/test | `npm test`, `go test`, `make`, `pytest`, `jest`, `cargo build` |
-| Linters | `eslint`, `prettier`, `mypy`, `golangci-lint` |
+| Interpreters | `node script.js`, `python3 script.py`, `ruby script.rb` |
 | K8s (read) | `kubectl get`, `describe`, `logs`, `explain` |
 | AWS (read) | `aws sts`, `aws s3 ls`, `aws ec2 describe` |
-| Search | `grep`, `rg`, `ag`, `awk` |
+| Search | `grep`, `rg`, `ag`, `sed -n` |
 | Terraform (read) | `plan`, `show`, `validate`, `fmt`, `init` |
 | Utilities | `mkdir`, `jq`, `yq`, `echo`, `date` |
 
-## The learning allowlist
+## Learning allowlist
 
-When a command falls through to the manual prompt and you approve it, Claude will ask:
+When a command falls through to the normal prompt and you approve it, Claude can offer to save it for next time as a prefix or exact match.
 
-> Would you like me to add this to your safety allowlist so it's auto-approved next time?
-> 1. **Prefix match** -- always allow commands starting with `docker build`
-> 2. **Exact match** -- only allow this exact command
-> 3. **No** -- don't add it
-
-Your choices are saved to `hooks/safety-allowlist.json`:
+The allowlist lives at `~/.claude-safe-auto-allow/safety-allowlist.json`:
 
 ```json
 {
@@ -117,45 +95,29 @@ Your choices are saved to `hooks/safety-allowlist.json`:
 }
 ```
 
-The allowlist is checked **after** the block list, so you can never accidentally allowlist a dangerous command.
+Dangerous commands never bypass the dangerous check, even if the allowlist contains a matching entry.
+
+## Building from source
+
+```bash
+go test ./...
+go build -o claude-safety ./cmd/claude-safety
+```
+
+The binary looks for `safety-allowlist.json` and `version.txt` in the same directory as the executable.
 
 ## Tests
 
 ```bash
-npm test
-# or
-node tests/safety-guard.test.js
+go test ./...
+bash tests/test-install-e2e.sh
 ```
-
-## Configuration
-
-### Adding custom block patterns
-
-Edit `hooks/safety-guard.js` and add entries to the `blockPatterns` array:
-
-```js
-{ pattern: /\bmy-dangerous-command\b/i, reason: 'Custom block reason' },
-```
-
-### Adding custom safe patterns
-
-Add entries to the `safePatterns` array:
-
-```js
-/^\s*my-safe-tool\s/,
-```
-
-### Editing the allowlist directly
-
-Edit `hooks/safety-allowlist.json`. Supported types:
-- `prefix` -- matches if command starts with the value
-- `exact` -- matches if command equals the value exactly
-- `regex` -- matches if command matches the regex
 
 ## Requirements
 
-- Node.js >= 16
 - Claude Code
+- No runtime dependencies for end users
+- Go 1.21+ only if you are building from source
 
 ## License
 
